@@ -92,8 +92,8 @@ class Context:
         objects = [mk_object(self, source) for source in self._sources]
 
         with open("Makefile", "w") as mk:
-            exec = mk_executable(self)
-            mk.write(f"{exec[0]}\n\t{exec[1]}\n")
+            executable = mk_executable(self)
+            mk.write(f"{executable[0]}\n\t{executable[1]}\n")
 
             for object in objects:
                 mk.write(f"{object[0]}\t{object[1]}\n")
@@ -104,6 +104,7 @@ class Context:
                     "directory": root_dir(),
                     "command": object[1],
                     "file": object[2],
+                    "output": object[3],
                 }
                 for object in objects
             ]
@@ -115,6 +116,38 @@ class Context:
         compiler = get_c_compiler()
 
         return cls(name, compiler, "build")
+
+    @classmethod
+    def build_multiple(cls, ctxs: list["Context"]):
+        executables: list[tuple] = []
+        objects: list[tuple] = []
+        for ctx in ctxs:
+            objects.extend([mk_object(ctx, source) for source in ctx._sources])
+            executables.append(mk_executable(ctx))
+
+        with open("Makefile", "w") as mk:
+            mk.write(
+                f"all: {' '.join([executable[2] for executable in executables])}\n"
+            )
+
+            for executable in executables:
+                mk.write(f"{executable[0]}\n\t{executable[1]}\n")
+
+            for object in objects:
+                mk.write(f"{object[0]}\t{object[1]}\n")
+
+        with open(f"{ctxs[0].build_dir}/compile_commands.json", "w") as j:
+            data = [
+                {
+                    "directory": root_dir(),
+                    "command": object[1],
+                    "file": object[2],
+                    "output": object[3],
+                }
+                for object in objects
+            ]
+
+            j.write(json.dumps(data, indent=4))
 
 
 def pkgconfig_cflags(deps: list[str]):
@@ -139,10 +172,12 @@ def object_name(ctx: Context, source: str):
 
 
 def mk_object(ctx: Context, source: str):
+    output = object_name(ctx, source)
+
     header = run(
         [ctx.compiler]
         + [f"-I{i}" for i in ctx._includes]
-        + ["-MT", object_name(ctx, source), "-MM", source]
+        + ["-MT", output, "-MM", source]
     )
 
     if header.returncode != 0:
@@ -150,18 +185,20 @@ def mk_object(ctx: Context, source: str):
             f"failed making a makefile entry for `{source}`:\n{header.stderr}"
         )
 
-    cmd = f"{ctx.compiler} -c {ctx._flags} {' '.join([f"-I{i}" for i in ctx._includes])} -o {object_name(ctx, source)} {source}"
+    cmd = f"{ctx.compiler} -c {ctx._flags} {' '.join([f"-I{i}" for i in ctx._includes])} -o {output} {source}"
 
-    return (header.stdout, cmd, source)
+    return (header.stdout, cmd, source, output)
 
 
 def mk_executable(ctx: Context):
     objects = [object_name(ctx, source) for source in ctx._sources]
 
-    header = f"{ctx.build_dir}/{ctx.name}: {' '.join(objects)}"
-    cmd = f"{ctx.compiler} {ctx._flags} {ctx._libs} -o {f'{ctx.build_dir}/{ctx.name}'} {' '.join(objects)}"
+    output = f"{ctx.build_dir}/{ctx.name}"
 
-    return (header, cmd)
+    header = f"{ctx.build_dir}/{ctx.name}: {' '.join(objects)}"
+    cmd = f"{ctx.compiler} {ctx._flags} {ctx._libs} -o {output} {' '.join(objects)}"
+
+    return (header, cmd, output)
 
 
 def root_dir():
