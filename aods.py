@@ -24,6 +24,8 @@ class Context:
         self.compiler = compiler
         self.build_dir = build_dir
 
+        self._index = -1
+
     @property
     def name(self):
         return self._name
@@ -92,8 +94,8 @@ class Context:
         objects = [mk_object(self, source) for source in self._sources]
 
         with open("Makefile", "w") as mk:
-            executable = mk_executable(self)
-            mk.write(f"{executable[0]}\n\t{executable[1]}\n")
+            final = mk_final(self)
+            mk.write(f"{final[0]}\n\t{final[1]}\n")
 
             for object in objects:
                 mk.write(f"{object[0]}\t{object[1]}\n")
@@ -119,19 +121,19 @@ class Context:
 
     @classmethod
     def build_multiple(cls, ctxs: list["Context"]):
-        executables: list[tuple] = []
+        finals: list[tuple] = []
         objects: list[tuple] = []
-        for ctx in ctxs:
+        for index, ctx in enumerate(ctxs):
+            ctx._index = index
+
             objects.extend([mk_object(ctx, source) for source in ctx._sources])
-            executables.append(mk_executable(ctx))
+            finals.append(mk_final(ctx))
 
         with open("Makefile", "w") as mk:
-            mk.write(
-                f"all: {' '.join([executable[2] for executable in executables])}\n"
-            )
+            mk.write(f"all: {' '.join([final[2] for final in finals])}\n")
 
-            for executable in executables:
-                mk.write(f"{executable[0]}\n\t{executable[1]}\n")
+            for final in finals:
+                mk.write(f"{final[0]}\n\t{final[1]}\n")
 
             for object in objects:
                 mk.write(f"{object[0]}\t{object[1]}\n")
@@ -168,11 +170,16 @@ def pkgconfig_libs(deps: list[str]):
 
 def object_name(ctx: Context, source: str):
     base = base_name(file_name(source))
+    if ctx._index != -1:
+        base = f"{ctx._index}_{base}"
+
     return f"{ctx.build_dir}/{base}.o"
 
 
 def mk_object(ctx: Context, source: str):
     output = object_name(ctx, source)
+
+    is_shared = ctx.name.endswith(".so")
 
     header = run(
         [ctx.compiler]
@@ -185,7 +192,7 @@ def mk_object(ctx: Context, source: str):
             f"failed making a makefile entry for `{source}`:\n{header.stderr}"
         )
 
-    cmd = f"{ctx.compiler} -c {ctx._flags} {' '.join([f"-I{i}" for i in ctx._includes])} -o {output} {source}"
+    cmd = f"{ctx.compiler} -c {ctx._flags} {'-fPIC' if is_shared else ''} {' '.join([f"-I{i}" for i in ctx._includes])} -o {output} {source}"
 
     return (header.stdout, cmd, source, output)
 
@@ -199,6 +206,24 @@ def mk_executable(ctx: Context):
     cmd = f"{ctx.compiler} {ctx._flags} {ctx._libs} -o {output} {' '.join(objects)}"
 
     return (header, cmd, output)
+
+
+def mk_shared(ctx: Context):
+    objects = [object_name(ctx, source) for source in ctx._sources]
+
+    output = f"{ctx.build_dir}/{ctx.name}"
+
+    header = f"{ctx.build_dir}/{ctx.name}: {' '.join(objects)}"
+    cmd = f"{ctx.compiler} -shared {ctx._flags} {ctx._libs} -o {output} {' '.join(objects)}"
+
+    return (header, cmd, output)
+
+
+def mk_final(ctx: Context):
+    if ctx.name.endswith(".so"):
+        return mk_shared(ctx)
+
+    return mk_executable(ctx)
 
 
 def root_dir():
