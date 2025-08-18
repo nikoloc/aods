@@ -1,4 +1,4 @@
-a simple and hackable build script for c projects
+small and hackable build system for c 
 
 # installation
 just copy the script to your project and hack around it, or put it in some directory found in your `$PYTHON_PATH`, and then import it in your script with `import aods`.
