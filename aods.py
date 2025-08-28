@@ -229,9 +229,9 @@ def mk_final(ctx: Context):
 def root_dir():
     path = sys.modules["__main__"].__file__
     if path == None:
-        raise Exception("couldn't get this scripts name")
+        raise Exception("couldn't get this scripts name!")
 
-    return path
+    return path[: path.rindex("/")]
 
 
 class BuildType(Enum):
