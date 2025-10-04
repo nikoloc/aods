@@ -94,11 +94,15 @@ class Context:
         objects = [mk_object(self, source) for source in self._sources]
 
         with open("Makefile", "w") as mk:
+            mk.write(f"{mk_phony()}\n")
+
             final = mk_final(self)
             mk.write(f"{final[0]}\n\t{final[1]}\n")
 
             for object in objects:
                 mk.write(f"{object[0]}\t{object[1]}\n")
+
+            mk.write(mk_clean(self))
 
         with open(f"{self.build_dir}/compile_commands.json", "w") as j:
             data = [
@@ -130,6 +134,8 @@ class Context:
             finals.append(mk_final(ctx))
 
         with open("Makefile", "w") as mk:
+            mk.write(f"{mk_phony()}\n")
+
             mk.write(f"all: {' '.join([final[2] for final in finals])}\n")
 
             for final in finals:
@@ -137,6 +143,8 @@ class Context:
 
             for object in objects:
                 mk.write(f"{object[0]}\t{object[1]}\n")
+
+            mk.write(mk_clean(ctxs[0]))
 
         with open(f"{ctxs[0].build_dir}/compile_commands.json", "w") as j:
             data = [
@@ -174,6 +182,14 @@ def object_name(ctx: Context, source: str):
         base = f"{ctx._index}_{base}"
 
     return f"{ctx.build_dir}/{base}.o"
+
+
+def mk_phony():
+    return f".PHONY: clean"
+
+
+def mk_clean(ctx: Context):
+    return f"clean: {ctx.build_dir} Makefile\n\trm -rf {ctx.build_dir} Makefile"
 
 
 def mk_object(ctx: Context, source: str):
