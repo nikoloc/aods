@@ -5,20 +5,26 @@ import os
 from enum import Enum
 
 
+class ProjectType(Enum):
+    EXECUTABLE = 0
+    SHARED_LIBRARY = 1
+    STATIC_LIBRARY = 2
+
+
 class Context:
-    def __init__(
-        self,
-        name: str,
-        compiler: str,
-        build_dir: str,
-    ):
+    def __init__(self, name: str, compiler: str, build_dir: str):
         self._sources: list[str] = []
+        self._flags: list[str] = []
 
-        self._includes: list[str] = []
-
-        self._dependencies: list[str] = []
-        self._flags = ""
-        self._libs = ""
+        self._project_type = (
+            ProjectType.SHARED_LIBRARY
+            if name.endswith(".so")
+            else (
+                ProjectType.STATIC_LIBRARY
+                if name.endswith(".a")
+                else ProjectType.EXECUTABLE
+            )
+        )
 
         self.name = name
         self.compiler = compiler
@@ -50,6 +56,7 @@ class Context:
     @build_dir.setter
     def build_dir(self, value: str):
         make_dir(value)
+        make_dir(value + "/deps")
 
         self._build_dir = value
 
@@ -64,38 +71,30 @@ class Context:
             include = [include]
 
         for i in include:
-            self._includes.append(i)
+            add_flag(self, " -I" + i)
 
     def add_dependency(self, dep: str | list[str]):
         if isinstance(dep, str):
             dep = [dep]
 
-        self._dependencies.extend(dep)
-
         for d in dep:
             assert_installed(d)
-
-        if self._flags != "":
-            self._flags += " "
-
-        self._flags += pkgconfig_cflags(dep)
-        self._libs += pkgconfig_libs(dep)
+            # we cannot add them as usual since they might have some spaces if multiple arguments. i am counting on pkg-config to handle that anyway
+            self._flags.append(f"{pkgconfig_cflags(d)}"))
+            add_flag(self, f"{pkgconfig_libs(d)}")
 
     def add_flag(self, flag: str | list[str]):
         if isinstance(flag, str):
             flag = [flag]
 
         for f in flag:
-            if self._flags != "":
-                self._flags += " "
-
-            self._flags += f'"{f}"'
+            add_flag(self, f)
 
     def build(self):
         objects = [mk_object(self, source) for source in self._sources]
 
         with open("Makefile", "w") as mk:
-            mk.write(f"{mk_phony()}\n")
+            mk.write(mk_phony())
 
             header, cmd, _ = mk_target(self)
             mk.write(f"{header}\n\t{cmd}\n")
@@ -162,24 +161,30 @@ class Context:
             j.write(json.dumps(data, indent=4))
 
 
-def pkgconfig_cflags(deps: list[str]):
-    ok, flags = run(["pkg-config", "-cflags"] + deps)
+def add_flag(ctx: Context, flag: str):
+    ctx._flags.append(f'"{flag}"')
+
+
+def pkgconfig_cflags(dep: str):
+    cmd = ["pkg-config", "--cflags", dep]
+
+    ok, flags = run(cmd)
     if not ok:
-        raise Exception(f"`pkg-config -cflags` failed on `{deps}`")
+        raise Exception(f"`pkg-config --cflags` failed on `{dep}`")
 
     return flags
 
 
-def pkgconfig_libs(deps: list[str]):
-    ok, libs = run(["pkg-config", "-libs"] + deps)
+def pkgconfig_libs(dep: str):
+    ok, libs = run(["pkg-config", "-libs", dep])
     if not ok:
-        raise Exception(f"pkg-config -libs failed on `{deps}`")
+        raise Exception(f"pkg-config --libs failed on `{dep}`")
 
     return libs
 
 
-def object_name(ctx: Context, source: str):
-    base = base_name(file_name(source))
+def object_dest(ctx: Context, source: str):
+    base = file_name_no_extension(source)
     if ctx._index != -1:
         base = f"{ctx._index}_{base}"
 
@@ -187,65 +192,36 @@ def object_name(ctx: Context, source: str):
 
 
 def mk_phony():
-    return f".PHONY: clean"
+    return f".PHONY: clean\n"
 
 
 def mk_clean(ctx: Context):
-    return f'clean: {ctx.build_dir} Makefile\n\trm -rf "{ctx.build_dir}" Makefile'
+    return f'clean: {ctx.build_dir} Makefile\n\trm -rf "{ctx.build_dir}" Makefile\n'
 
 
-def mk_object(ctx: Context, source: str):
-    output = object_name(ctx, source)
+def create_object_cmd(ctx: Context, source: str):
+    dest = object_dest(ctx, source)
 
-    is_shared = ctx.name.endswith(".so")
+    flags = ctx._flags
+    if ctx._project_type == ProjectType.SHARED_LIBRARY:
+        flags += " -fPIC"
 
-    print(
-        [ctx.compiler]
-        + [f"-I{i}" for i in ctx._includes]
-        + ["-MT", output, "-MM", source]
-    )
-
-    ok, result = run(
-        [ctx.compiler]
-        + [f"-I{i}" for i in ctx._includes]
-        + ["-MT", output, "-MM", source]
-    )
-
-    if not ok:
-        raise Exception(f"failed making a makefile entry for `{source}`:\n{result}")
-
-    cmd = f"{ctx.compiler} -c {ctx._flags} {'-fPIC' if is_shared else ''} {' '.join([f"-I{i}" for i in ctx._includes])} -o {output} {source}"
-
-    return (result, cmd, source, output)
+    cmd = f'{ctx.compiler} -c {ctx._flags} -o {dest} -MMD -MP -MF "{ctx._build_dir}/deps/{source}.d" {source}'
+    return cmd
 
 
-def mk_executable(ctx: Context):
-    objects = [object_name(ctx, source) for source in ctx._sources]
-
+def create_target_makefile_entry(ctx: Context, objects: list[str]):
     output = f"{ctx.build_dir}/{ctx.name}"
+    expanded = " ".join(f'"{o}"' for o in objects)
 
-    header = f"{ctx.build_dir}/{ctx.name}: {' '.join(objects)}"
-    cmd = f"{ctx.compiler} {ctx._flags} {ctx._libs} -o {output} {' '.join(objects)}"
+    header = f"{ctx.build_dir}/{ctx.name}: {expanded}"
 
-    return (header, cmd, output)
+    if(ctx._project_type == ProjectType.SHARED_LIBRARY):
+        cmd = f'"{ctx.compiler}" "-shared" {ctx._flags} -o "{output}" {expanded}'
+    else:
+        cmd = f'"{ctx.compiler}" {ctx._flags} -o "{output}" {expanded}'
 
-
-def mk_shared(ctx: Context):
-    objects = [object_name(ctx, source) for source in ctx._sources]
-
-    output = f"{ctx.build_dir}/{ctx.name}"
-
-    header = f"{ctx.build_dir}/{ctx.name}: {' '.join(objects)}"
-    cmd = f"{ctx.compiler} -shared {ctx._flags} {ctx._libs} -o {output} {' '.join(objects)}"
-
-    return (header, cmd, output)
-
-
-def mk_target(ctx: Context):
-    if ctx.name.endswith(".so"):
-        return mk_shared(ctx)
-
-    return mk_executable(ctx)
+    return f"{header}: {expanded}\n\t{cmd}\n"
 
 
 def root_dir():
@@ -256,14 +232,7 @@ def root_dir():
     return path[: path.rindex("/")]
 
 
-class BuildType(Enum):
-    DEBUG = 0
-    RELEASE = 1
-
-
 def run(cmd: list[str]):
-    print(cmd)
-
     info = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return (
         info.returncode == 0,
@@ -295,12 +264,8 @@ def make_dir(dir: str):
         return
 
 
-def base_name(name: str):
-    return name.split(".")[0]
-
-
-def file_name(path: str):
-    return os.path.basename(path)
+def file_name_no_extension(path: str):
+    return os.path.basename(path).split(".")[0]
 
 
 def pkgconfig_is_installed(pkg: str):
@@ -315,35 +280,36 @@ def assert_installed(pkg: str):
 
 
 def pkgconfig_get_variable(pkg: str, var: str):
-    ok, result = run(["pkg-config", f"--variable={var}", pkg])
+    ok, output = run(["pkg-config", f"--variable={var}", pkg])
     if not ok:
         raise Exception(f"no variable `{var}` for package `{pkg}`")
 
-    return result
+    return output
 
 
-def default_flags(type: BuildType):
-    if type == BuildType.RELEASE:
-        return [
-            "-O2",
-            "-march=native",
-            "-flto",
-            "-Wall",
-            "-Wextra",
-            "-Wpedantic",
-            "-fstack-protector-strong",
-            "-D_FORTIFY_SOURCE=2",
-            "-Wformat",
-            "-Wformat-security",
-        ]
-    else:
-        return [
-            "-g",
-            "-O0",
-            "-Wall",
-            "-Wextra",
-            "-Wpedantic",
-            "-Wnull-dereference",
-            "-fsanitize=address,undefined",
-            "-fno-omit-frame-pointer",
-        ]
+def default_debug_flags():
+    return [
+        "-g",
+        "-O0",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Wnull-dereference",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+    ]
+
+
+def default_release_flags():
+    return [
+        "-O2",
+        "-march=native",
+        "-flto",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-fstack-protector-strong",
+        "-D_FORTIFY_SOURCE=2",
+        "-Wformat",
+        "-Wformat-security",
+    ]
