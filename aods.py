@@ -24,6 +24,7 @@ class Context:
         self.compiler = compiler
         self.build_dir = build_dir
 
+        # used when building multiple projects with `Context.build_multiple()`
         self._index = -1
 
     @property
@@ -88,7 +89,7 @@ class Context:
             if self._flags != "":
                 self._flags += " "
 
-            self._flags += f
+            self._flags += f'"{f}"'
 
     def build(self):
         objects = [mk_object(self, source) for source in self._sources]
@@ -96,11 +97,11 @@ class Context:
         with open("Makefile", "w") as mk:
             mk.write(f"{mk_phony()}\n")
 
-            final = mk_final(self)
-            mk.write(f"{final[0]}\n\t{final[1]}\n")
+            header, cmd, _ = mk_target(self)
+            mk.write(f"{header}\n\t{cmd}\n")
 
-            for object in objects:
-                mk.write(f"{object[0]}\t{object[1]}\n")
+            for header, cmd, _, _ in objects:
+                mk.write(f"{header}\n\t{cmd}\n")
 
             mk.write(mk_clean(self))
 
@@ -108,11 +109,11 @@ class Context:
             data = [
                 {
                     "directory": root_dir(),
-                    "command": object[1],
-                    "file": object[2],
-                    "output": object[3],
+                    "command": cmd,
+                    "file": source,
+                    "output": output,
                 }
-                for object in objects
+                for _, cmd, source, output in objects
             ]
 
             j.write(json.dumps(data, indent=4))
@@ -125,24 +126,25 @@ class Context:
 
     @classmethod
     def build_multiple(cls, ctxs: list["Context"]):
-        finals: list[tuple] = []
+        targets: list[tuple] = []
         objects: list[tuple] = []
+
         for index, ctx in enumerate(ctxs):
             ctx._index = index
 
             objects.extend([mk_object(ctx, source) for source in ctx._sources])
-            finals.append(mk_final(ctx))
+            targets.append(mk_target(ctx))
 
         with open("Makefile", "w") as mk:
             mk.write(f"{mk_phony()}\n")
 
-            mk.write(f"all: {' '.join([final[2] for final in finals])}\n")
+            mk.write(f"all: {' '.join([output for _, _, output in targets])}\n")
 
-            for final in finals:
-                mk.write(f"{final[0]}\n\t{final[1]}\n")
+            for header, cmd, _ in targets:
+                mk.write(f"{header}\n\t{cmd}\n")
 
-            for object in objects:
-                mk.write(f"{object[0]}\t{object[1]}\n")
+            for header, cmd, _, _ in objects:
+                mk.write(f"{header}\n\t{cmd}\n")
 
             mk.write(mk_clean(ctxs[0]))
 
@@ -150,30 +152,30 @@ class Context:
             data = [
                 {
                     "directory": root_dir(),
-                    "command": object[1],
-                    "file": object[2],
-                    "output": object[3],
+                    "command": cmd,
+                    "file": source,
+                    "output": output,
                 }
-                for object in objects
+                for _, cmd, source, output in objects
             ]
 
             j.write(json.dumps(data, indent=4))
 
 
 def pkgconfig_cflags(deps: list[str]):
-    flags = run(["pkg-config", "-cflags"] + deps)
-    if flags.returncode != 0:
-        raise Exception(f"`pkg-config -cflags` failed")
+    ok, flags = run(["pkg-config", "-cflags"] + deps)
+    if not ok:
+        raise Exception(f"`pkg-config -cflags` failed on `{deps}`")
 
-    return flags.stdout.strip()
+    return flags
 
 
 def pkgconfig_libs(deps: list[str]):
-    libs = run(["pkg-config", "-libs"] + deps)
-    if libs.returncode != 0:
-        raise Exception(f"pkg-config -libs failed")
+    ok, libs = run(["pkg-config", "-libs"] + deps)
+    if not ok:
+        raise Exception(f"pkg-config -libs failed on `{deps}`")
 
-    return libs.stdout.strip()
+    return libs
 
 
 def object_name(ctx: Context, source: str):
@@ -189,7 +191,7 @@ def mk_phony():
 
 
 def mk_clean(ctx: Context):
-    return f"clean: {ctx.build_dir} Makefile\n\trm -rf {ctx.build_dir} Makefile"
+    return f'clean: {ctx.build_dir} Makefile\n\trm -rf "{ctx.build_dir}" Makefile'
 
 
 def mk_object(ctx: Context, source: str):
@@ -197,20 +199,24 @@ def mk_object(ctx: Context, source: str):
 
     is_shared = ctx.name.endswith(".so")
 
-    header = run(
+    print(
         [ctx.compiler]
         + [f"-I{i}" for i in ctx._includes]
         + ["-MT", output, "-MM", source]
     )
 
-    if header.returncode != 0:
-        raise Exception(
-            f"failed making a makefile entry for `{source}`:\n{header.stderr}"
-        )
+    ok, result = run(
+        [ctx.compiler]
+        + [f"-I{i}" for i in ctx._includes]
+        + ["-MT", output, "-MM", source]
+    )
+
+    if not ok:
+        raise Exception(f"failed making a makefile entry for `{source}`:\n{result}")
 
     cmd = f"{ctx.compiler} -c {ctx._flags} {'-fPIC' if is_shared else ''} {' '.join([f"-I{i}" for i in ctx._includes])} -o {output} {source}"
 
-    return (header.stdout, cmd, source, output)
+    return (result, cmd, source, output)
 
 
 def mk_executable(ctx: Context):
@@ -235,7 +241,7 @@ def mk_shared(ctx: Context):
     return (header, cmd, output)
 
 
-def mk_final(ctx: Context):
+def mk_target(ctx: Context):
     if ctx.name.endswith(".so"):
         return mk_shared(ctx)
 
@@ -256,22 +262,27 @@ class BuildType(Enum):
 
 
 def run(cmd: list[str]):
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    return result
+    print(cmd)
+
+    info = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return (
+        info.returncode == 0,
+        info.stdout.strip() if info.returncode == 0 else info.stderr.strip(),
+    )
 
 
 def get_c_compiler():
-    result = run(["which", "cc"])
-    if result.returncode == 0:
+    ok, _ = run(["which", "cc"])
+    if ok:
         return "cc"
 
     # fallback to gcc or clang if cc is not defined
-    result = run(["which", "gcc"])
-    if result.returncode == 0:
+    ok, _ = run(["which", "gcc"])
+    if ok:
         return "gcc"
 
-    result = run(["which", "clang"])
-    if result.returncode == 0:
+    ok, _ = run(["which", "clang"])
+    if ok:
         return "clang"
 
     raise Exception("no c compiler found")
@@ -293,22 +304,22 @@ def file_name(path: str):
 
 
 def pkgconfig_is_installed(pkg: str):
-    result = run(["pkg-config", "--exists", pkg])
+    ok, _ = run(["pkg-config", "--exists", pkg])
 
-    return result.returncode == 0
+    return ok
 
 
 def assert_installed(pkg: str):
     if not pkgconfig_is_installed(pkg):
-        raise Exception(f"`{pkg}` not installed!")
+        raise Exception(f"`{pkg}` not found with pkgconfig!")
 
 
 def pkgconfig_get_variable(pkg: str, var: str):
-    result = run(["pkg-config", f"--variable={var}", pkg])
-    if result.returncode != 0:
-        raise Exception(f"no variable {var} for package {pkg}")
+    ok, result = run(["pkg-config", f"--variable={var}", pkg])
+    if not ok:
+        raise Exception(f"no variable `{var}` for package `{pkg}`")
 
-    return result.stdout.strip()
+    return result
 
 
 def default_flags(type: BuildType):
