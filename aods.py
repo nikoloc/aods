@@ -37,42 +37,43 @@ def get_c_compiler():
     raise Exception("no c compiler found")
 
 
+def create_build_dir(path: str):
+    try:
+        os.mkdir(path)
+        os.mkdir(f"{path}/deps")
+    except:
+        raise Exception(
+            f"couldn't make a build directory `{path}`!\nmaybe the project is already setup?\nrun `make clean` if you wish to reinitialize it!"
+        )
+
+
 class Context:
     def __init__(
         self,
         name: str,
+        *,
         build_dir: str = "build",
+        project_type: ProjectType = ProjectType.EXECUTABLE,
         compiler: str = get_c_compiler(),
         archiver: str = "ar",
     ):
         self._sources: list[str] = []
         self._flags: list[str] = []
 
-        self._project_type = (
-            ProjectType.SHARED_LIBRARY
-            if name.endswith(".so")
-            else (
-                ProjectType.STATIC_LIBRARY
-                if name.endswith(".a")
-                else ProjectType.EXECUTABLE
-            )
-        )
-
-        if self._project_type == ProjectType.STATIC_LIBRARY:
-            ok, _ = run(["which", archiver])
-            if not ok:
-                raise Exception("buildling a static library but no archiver found!")
-
         self._name = name
+        self._build_dir = build_dir
+        self._project_type = project_type
         self._compiler = compiler
         self._archiver = archiver
-        self._build_dir = build_dir
 
-        try:
-            os.mkdir(build_dir)
-            os.mkdir(f"{build_dir}/deps")
-        except:
-            pass
+        ok, _ = run(["which", self._compiler])
+        if not ok:
+            raise Exception("no compiler found!")
+
+        if self._project_type == ProjectType.STATIC_LIBRARY:
+            ok, _ = run(["which", self._archiver])
+            if not ok:
+                raise Exception("building a static library but no archiver found!")
 
         # used when building multiple projects with `Context.build_multiple()`, value of -1 means we are not
         self._index = -1
@@ -116,6 +117,8 @@ class Context:
         self._flags.extend(flag)
 
     def build(self):
+        create_build_dir(self._build_dir)
+
         objects = [
             create_object_makefile_entry(self, source) for source in self._sources
         ]
@@ -129,8 +132,7 @@ class Context:
             )
             mk.write(target["entry"])
 
-            mk.write(create_clean_makefile_entry(self))
-            # mk.write(create_build_dir_makefile_entry(self))
+            mk.write(create_clean_makefile_entry([self._build_dir]))
 
             for object in objects:
                 mk.write(object["entry"])
@@ -152,10 +154,19 @@ class Context:
 
     @classmethod
     def build_multiple(cls, ctxs: list["Context"]):
+        if len(ctxs) == 0:
+            return
+
         targets: list[dict] = []
         objects: list[dict] = []
 
+        build_dirs: list[str] = []
+
         for index, ctx in enumerate(ctxs):
+            if not ctx._build_dir in build_dirs:
+                create_build_dir(ctx._build_dir)
+                build_dirs.append(ctx._build_dir)
+
             ctx._index = index
 
             target_objects = [
@@ -178,8 +189,7 @@ class Context:
                 create_header("all", [target["dest"] for target in targets]) + "\n"
             )
 
-            mk.write(create_clean_makefile_entry(ctxs[0]))
-            # mk.write(create_build_dir_makefile_entry(ctxs[0]))
+            mk.write(create_clean_makefile_entry(build_dirs))
 
             for target in targets:
                 mk.write(target["entry"])
@@ -187,6 +197,7 @@ class Context:
             for object in objects:
                 mk.write(object["entry"])
 
+        # we just dump it in the first build directory, it is not really important to separate them
         with open(f"{ctxs[0]._build_dir}/compile_commands.json", "w") as j:
             root = get_root_dir()
 
@@ -265,24 +276,10 @@ def create_phony_list():
     return f".PHONY: clean\n"
 
 
-def create_clean_makefile_entry(ctx: Context):
-    header = create_header("clean", ["Makefile"], [ctx._build_dir])
-    cmd = create_shell(["rm", "-rf", ctx._build_dir, "Makefile"])
+def create_clean_makefile_entry(build_dirs: list[str]):
+    header = create_header("clean", ["Makefile"], build_dirs)
+    cmd = create_shell(["rm", "-rf", *build_dirs, "Makefile"])
     return f"{header}\n\t{cmd}\n"
-
-
-def create_build_dir_makefile_entry(ctx: Context):
-    header = create_header(ctx._build_dir)
-    cmd = create_shell(["mkdir", ctx._build_dir])
-
-    ret = f"{header}\n\t{cmd}\n"
-
-    header = create_header(f"{ctx._build_dir}/deps", [], [ctx._build_dir])
-    cmd = create_shell(["mkdir", f"{ctx._build_dir}/deps"])
-
-    ret += f"{header}\n\t{cmd}\n"
-
-    return ret
 
 
 def create_object_makefile_entry(ctx: Context, source: str):
@@ -336,7 +333,7 @@ def create_target_makefile_entry(ctx: Context, objects: list[str]):
                 ]
             )
         case ProjectType.SHARED_LIBRARY:
-            dest = f"{ctx._build_dir}/lib{ctx._name}"
+            dest = f"{ctx._build_dir}/lib{ctx._name}.so"
             header = create_header(dest, objects, [ctx._build_dir])
 
             cmd = create_shell(
@@ -350,7 +347,7 @@ def create_target_makefile_entry(ctx: Context, objects: list[str]):
                 ]
             )
         case ProjectType.STATIC_LIBRARY:
-            dest = f"{ctx._build_dir}/lib{ctx._name}"
+            dest = f"{ctx._build_dir}/lib{ctx._name}.a"
             header = create_header(dest, objects, [ctx._build_dir])
 
             cmd = create_shell(
