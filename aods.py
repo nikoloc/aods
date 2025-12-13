@@ -291,7 +291,7 @@ def create_object_makefile_entry(ctx: Context, source: str):
 
     flags = ctx._flags
     if ctx._project_type == ProjectType.SHARED_LIBRARY:
-        flags += "-fPIC"
+        flags.append("-fPIC")
 
     header = create_header(dest, [source], [ctx._build_dir, f"{ctx._build_dir}/deps"])
     cmd = create_shell(
@@ -336,7 +336,7 @@ def create_target_makefile_entry(ctx: Context, objects: list[str]):
                 ]
             )
         case ProjectType.SHARED_LIBRARY:
-            dest = f"{ctx._build_dir}/lib{ctx._name}.so"
+            dest = f"{ctx._build_dir}/lib{ctx._name}"
             header = create_header(dest, objects, [ctx._build_dir])
 
             cmd = create_shell(
@@ -350,7 +350,7 @@ def create_target_makefile_entry(ctx: Context, objects: list[str]):
                 ]
             )
         case ProjectType.STATIC_LIBRARY:
-            dest = f"{ctx._build_dir}/lib{ctx._name}.a"
+            dest = f"{ctx._build_dir}/lib{ctx._name}"
             header = create_header(dest, objects, [ctx._build_dir])
 
             cmd = create_shell(
