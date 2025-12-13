@@ -2,6 +2,7 @@ import sys
 import json
 import subprocess
 import os
+import shlex
 from enum import Enum
 
 
@@ -9,227 +10,6 @@ class ProjectType(Enum):
     EXECUTABLE = 0
     SHARED_LIBRARY = 1
     STATIC_LIBRARY = 2
-
-
-class Context:
-    def __init__(self, name: str, compiler: str, build_dir: str):
-        self._sources: list[str] = []
-        self._flags: list[str] = []
-
-        self._project_type = (
-            ProjectType.SHARED_LIBRARY
-            if name.endswith(".so")
-            else (
-                ProjectType.STATIC_LIBRARY
-                if name.endswith(".a")
-                else ProjectType.EXECUTABLE
-            )
-        )
-
-        self.name = name
-        self.compiler = compiler
-        self.build_dir = build_dir
-
-        # used when building multiple projects with `Context.build_multiple()`
-        self._index = -1
-
-    @property
-    def name(self):
-        return self._name
-
-    @name.setter
-    def name(self, value: str):
-        self._name = value
-
-    @property
-    def compiler(self):
-        return self._compiler
-
-    @compiler.setter
-    def compiler(self, value: str):
-        self._compiler = value
-
-    @property
-    def build_dir(self) -> str:
-        return self._build_dir
-
-    @build_dir.setter
-    def build_dir(self, value: str):
-        make_dir(value)
-        make_dir(value + "/deps")
-
-        self._build_dir = value
-
-    def add_source(self, source: str | list[str]):
-        if isinstance(source, str):
-            source = [source]
-
-        self._sources.extend(source)
-
-    def add_include(self, include: str | list[str]):
-        if isinstance(include, str):
-            include = [include]
-
-        for i in include:
-            add_flag(self, " -I" + i)
-
-    def add_dependency(self, dep: str | list[str]):
-        if isinstance(dep, str):
-            dep = [dep]
-
-        for d in dep:
-            assert_installed(d)
-            # we cannot add them as usual since they might have some spaces if multiple arguments. i am counting on pkg-config to handle that anyway
-            self._flags.append(f"{pkgconfig_cflags(d)}"))
-            add_flag(self, f"{pkgconfig_libs(d)}")
-
-    def add_flag(self, flag: str | list[str]):
-        if isinstance(flag, str):
-            flag = [flag]
-
-        for f in flag:
-            add_flag(self, f)
-
-    def build(self):
-        objects = [mk_object(self, source) for source in self._sources]
-
-        with open("Makefile", "w") as mk:
-            mk.write(mk_phony())
-
-            header, cmd, _ = mk_target(self)
-            mk.write(f"{header}\n\t{cmd}\n")
-
-            for header, cmd, _, _ in objects:
-                mk.write(f"{header}\n\t{cmd}\n")
-
-            mk.write(mk_clean(self))
-
-        with open(f"{self.build_dir}/compile_commands.json", "w") as j:
-            data = [
-                {
-                    "directory": root_dir(),
-                    "command": cmd,
-                    "file": source,
-                    "output": output,
-                }
-                for _, cmd, source, output in objects
-            ]
-
-            j.write(json.dumps(data, indent=4))
-
-    @classmethod
-    def default(cls, name):
-        compiler = get_c_compiler()
-
-        return cls(name, compiler, "build")
-
-    @classmethod
-    def build_multiple(cls, ctxs: list["Context"]):
-        targets: list[tuple] = []
-        objects: list[tuple] = []
-
-        for index, ctx in enumerate(ctxs):
-            ctx._index = index
-
-            objects.extend([mk_object(ctx, source) for source in ctx._sources])
-            targets.append(mk_target(ctx))
-
-        with open("Makefile", "w") as mk:
-            mk.write(f"{mk_phony()}\n")
-
-            mk.write(f"all: {' '.join([output for _, _, output in targets])}\n")
-
-            for header, cmd, _ in targets:
-                mk.write(f"{header}\n\t{cmd}\n")
-
-            for header, cmd, _, _ in objects:
-                mk.write(f"{header}\n\t{cmd}\n")
-
-            mk.write(mk_clean(ctxs[0]))
-
-        with open(f"{ctxs[0].build_dir}/compile_commands.json", "w") as j:
-            data = [
-                {
-                    "directory": root_dir(),
-                    "command": cmd,
-                    "file": source,
-                    "output": output,
-                }
-                for _, cmd, source, output in objects
-            ]
-
-            j.write(json.dumps(data, indent=4))
-
-
-def add_flag(ctx: Context, flag: str):
-    ctx._flags.append(f'"{flag}"')
-
-
-def pkgconfig_cflags(dep: str):
-    cmd = ["pkg-config", "--cflags", dep]
-
-    ok, flags = run(cmd)
-    if not ok:
-        raise Exception(f"`pkg-config --cflags` failed on `{dep}`")
-
-    return flags
-
-
-def pkgconfig_libs(dep: str):
-    ok, libs = run(["pkg-config", "-libs", dep])
-    if not ok:
-        raise Exception(f"pkg-config --libs failed on `{dep}`")
-
-    return libs
-
-
-def object_dest(ctx: Context, source: str):
-    base = file_name_no_extension(source)
-    if ctx._index != -1:
-        base = f"{ctx._index}_{base}"
-
-    return f"{ctx.build_dir}/{base}.o"
-
-
-def mk_phony():
-    return f".PHONY: clean\n"
-
-
-def mk_clean(ctx: Context):
-    return f'clean: {ctx.build_dir} Makefile\n\trm -rf "{ctx.build_dir}" Makefile\n'
-
-
-def create_object_cmd(ctx: Context, source: str):
-    dest = object_dest(ctx, source)
-
-    flags = ctx._flags
-    if ctx._project_type == ProjectType.SHARED_LIBRARY:
-        flags += " -fPIC"
-
-    cmd = f'{ctx.compiler} -c {ctx._flags} -o {dest} -MMD -MP -MF "{ctx._build_dir}/deps/{source}.d" {source}'
-    return cmd
-
-
-def create_target_makefile_entry(ctx: Context, objects: list[str]):
-    output = f"{ctx.build_dir}/{ctx.name}"
-    expanded = " ".join(f'"{o}"' for o in objects)
-
-    header = f"{ctx.build_dir}/{ctx.name}: {expanded}"
-
-    if(ctx._project_type == ProjectType.SHARED_LIBRARY):
-        cmd = f'"{ctx.compiler}" "-shared" {ctx._flags} -o "{output}" {expanded}'
-    else:
-        cmd = f'"{ctx.compiler}" {ctx._flags} -o "{output}" {expanded}'
-
-    return f"{header}: {expanded}\n\t{cmd}\n"
-
-
-def root_dir():
-    path = sys.modules["__main__"].__file__
-    if path == None:
-        raise Exception("couldn't get this scripts name!")
-
-    return path[: path.rindex("/")]
 
 
 def run(cmd: list[str]):
@@ -257,15 +37,344 @@ def get_c_compiler():
     raise Exception("no c compiler found")
 
 
-def make_dir(dir: str):
-    try:
-        os.mkdir(dir)
-    except:
-        return
+class Context:
+    def __init__(
+        self,
+        name: str,
+        build_dir: str = "build",
+        compiler: str = get_c_compiler(),
+        archiver: str = "ar",
+    ):
+        self._sources: list[str] = []
+        self._flags: list[str] = []
+
+        self._project_type = (
+            ProjectType.SHARED_LIBRARY
+            if name.endswith(".so")
+            else (
+                ProjectType.STATIC_LIBRARY
+                if name.endswith(".a")
+                else ProjectType.EXECUTABLE
+            )
+        )
+
+        if self._project_type == ProjectType.STATIC_LIBRARY:
+            ok, _ = run(["which", archiver])
+            if not ok:
+                raise Exception("buildling a static library but no archiver found!")
+
+        self._name = name
+        self._compiler = compiler
+        self._archiver = archiver
+        self._build_dir = build_dir
+
+        try:
+            os.mkdir(build_dir)
+            os.mkdir(f"{build_dir}/deps")
+        except:
+            pass
+
+        # used when building multiple projects with `Context.build_multiple()`, value of -1 means we are not
+        self._index = -1
+
+    def add_source(self, source: str | list[str]):
+        if isinstance(source, str):
+            source = [source]
+
+        self._sources.extend(source)
+
+    def add_include(self, include: str | list[str]):
+        if isinstance(include, str):
+            include = [include]
+
+        for i in include:
+            self._flags.append(f"-I{i}")
+
+    def add_dependency(self, dep: str | list[str]):
+        if isinstance(dep, str):
+            dep = [dep]
+
+        for d in dep:
+            assert_installed(d)
+
+        flags = pkgconfig_cflags(dep)
+        libs = pkgconfig_libs(dep)
+
+        # now we need to split these so they are passed as seperate arguments
+        # note: what if some of them have spaces so they are escaped with quotes?
+        # e.g. "-lsome library with spaces". is that even valid?
+        parts = flags.split()
+        self._flags.extend(parts)
+
+        parts = libs.split()
+        self._flags.extend(parts)
+
+    def add_flag(self, flag: str | list[str]):
+        if isinstance(flag, str):
+            flag = [flag]
+
+        self._flags.extend(flag)
+
+    def build(self):
+        objects = [
+            create_object_makefile_entry(self, source) for source in self._sources
+        ]
+
+        with open("Makefile", "w") as mk:
+            mk.write(create_phony_list())
+
+            # keep this first so it is a default target
+            target = create_target_makefile_entry(
+                self, [object["dest"] for object in objects]
+            )
+            mk.write(target["entry"])
+
+            mk.write(create_clean_makefile_entry(self))
+            # mk.write(create_build_dir_makefile_entry(self))
+
+            for object in objects:
+                mk.write(object["entry"])
+
+        with open(f"{self._build_dir}/compile_commands.json", "w") as j:
+            root = get_root_dir()
+
+            data = [
+                {
+                    "directory": root,
+                    "command": object["cmd"],
+                    "file": object["source"],
+                    "output": object["dest"],
+                }
+                for object in objects
+            ]
+
+            j.write(json.dumps(data, indent=4))
+
+    @classmethod
+    def build_multiple(cls, ctxs: list["Context"]):
+        targets: list[dict] = []
+        objects: list[dict] = []
+
+        for index, ctx in enumerate(ctxs):
+            ctx._index = index
+
+            target_objects = [
+                create_object_makefile_entry(ctx, source) for source in ctx._sources
+            ]
+
+            objects.extend(target_objects)
+
+            targets.append(
+                create_target_makefile_entry(
+                    ctx, [object["dest"] for object in target_objects]
+                )
+            )
+
+        with open("Makefile", "w") as mk:
+            mk.write(create_phony_list())
+
+            # keep this first so it is a default target
+            mk.write(
+                create_header("all", [target["dest"] for target in targets]) + "\n"
+            )
+
+            mk.write(create_clean_makefile_entry(ctxs[0]))
+            # mk.write(create_build_dir_makefile_entry(ctxs[0]))
+
+            for target in targets:
+                mk.write(target["entry"])
+
+            for object in objects:
+                mk.write(object["entry"])
+
+        with open(f"{ctxs[0]._build_dir}/compile_commands.json", "w") as j:
+            root = get_root_dir()
+
+            data = [
+                {
+                    "directory": root,
+                    "command": object["cmd"],
+                    "file": object["source"],
+                    "output": object["dest"],
+                }
+                for object in objects
+            ]
+
+            j.write(json.dumps(data, indent=4))
 
 
 def file_name_no_extension(path: str):
     return os.path.basename(path).split(".")[0]
+
+
+def pkgconfig_cflags(dep: str | list[str]):
+    if isinstance(dep, str):
+        dep = [dep]
+
+    cmd = ["pkg-config", "--cflags"] + dep
+
+    ok, output = run(cmd)
+    if not ok:
+        raise Exception(f"`pkg-config --cflags` failed on `{dep}`")
+
+    return output
+
+
+def pkgconfig_libs(dep: str | list[str]):
+    if isinstance(dep, str):
+        dep = [dep]
+
+    cmd = ["pkg-config", "--libs"] + dep
+
+    ok, output = run(cmd)
+    if not ok:
+        raise Exception(f"pkg-config --libs failed on `{dep}`")
+
+    return output
+
+
+def create_object_name(ctx: Context, source: str):
+    base = file_name_no_extension(source)
+    if ctx._index != -1:
+        base = f"{ctx._index}_{base}"
+
+    return f"{ctx._build_dir}/{base}.o"
+
+
+def create_dep_name(ctx: Context, source: str):
+    base = file_name_no_extension(source)
+    if ctx._index != -1:
+        base = f"{ctx._index}_{base}"
+
+    return f"{ctx._build_dir}/deps/{base}.d"
+
+
+def escape_spaces(s: str):
+    return s.replace(" ", r"\ ")
+
+
+def create_header(target: str, deps: list[str] = [], dir_deps: list[str] = []):
+    return f"{escape_spaces(target)}: {' '.join(escape_spaces(dep) for dep in deps)} | {' '.join(escape_spaces(dep) for dep in dir_deps)}"
+
+
+def create_shell(args: list[str]):
+    return shlex.join(args)
+
+
+def create_phony_list():
+    return f".PHONY: clean\n"
+
+
+def create_clean_makefile_entry(ctx: Context):
+    header = create_header("clean", ["Makefile"], [ctx._build_dir])
+    cmd = create_shell(["rm", "-rf", ctx._build_dir, "Makefile"])
+    return f"{header}\n\t{cmd}\n"
+
+
+def create_build_dir_makefile_entry(ctx: Context):
+    header = create_header(ctx._build_dir)
+    cmd = create_shell(["mkdir", ctx._build_dir])
+
+    ret = f"{header}\n\t{cmd}\n"
+
+    header = create_header(f"{ctx._build_dir}/deps", [], [ctx._build_dir])
+    cmd = create_shell(["mkdir", f"{ctx._build_dir}/deps"])
+
+    ret += f"{header}\n\t{cmd}\n"
+
+    return ret
+
+
+def create_object_makefile_entry(ctx: Context, source: str):
+    dest = create_object_name(ctx, source)
+    dep = create_dep_name(ctx, source)
+
+    flags = ctx._flags
+    if ctx._project_type == ProjectType.SHARED_LIBRARY:
+        flags += "-fPIC"
+
+    header = create_header(dest, [source], [ctx._build_dir, f"{ctx._build_dir}/deps"])
+    cmd = create_shell(
+        [
+            ctx._compiler,
+            "-c",
+            *flags,
+            "-o",
+            dest,
+            "-MMD",
+            "-MP",
+            "-MF",
+            dep,
+            source,
+        ]
+    )
+
+    entry = f"{header}\n\t{cmd}\n"
+    entry += f"-include {escape_spaces(dep)}\n"
+
+    return {
+        "entry": entry,
+        "source": source,
+        "dest": dest,
+        "cmd": cmd,
+    }
+
+
+def create_target_makefile_entry(ctx: Context, objects: list[str]):
+    match ctx._project_type:
+        case ProjectType.EXECUTABLE:
+            dest = f"{ctx._build_dir}/{ctx._name}"
+            header = create_header(dest, objects, [ctx._build_dir])
+
+            cmd = create_shell(
+                [
+                    ctx._compiler,
+                    *ctx._flags,
+                    "-o",
+                    dest,
+                    *objects,
+                ]
+            )
+        case ProjectType.SHARED_LIBRARY:
+            dest = f"{ctx._build_dir}/lib{ctx._name}.so"
+            header = create_header(dest, objects, [ctx._build_dir])
+
+            cmd = create_shell(
+                [
+                    ctx._compiler,
+                    "-shared",
+                    *ctx._flags,
+                    "-o",
+                    dest,
+                    *objects,
+                ]
+            )
+        case ProjectType.STATIC_LIBRARY:
+            dest = f"{ctx._build_dir}/lib{ctx._name}.a"
+            header = create_header(dest, objects, [ctx._build_dir])
+
+            cmd = create_shell(
+                [
+                    ctx._archiver,
+                    "rcs",
+                    dest,
+                    *objects,
+                ]
+            )
+
+    return {
+        "entry": f"{header}\n\t{cmd}\n",
+        "dest": dest,
+        "cmd": cmd,
+    }
+
+
+def get_root_dir():
+    path = sys.modules["__main__"].__file__
+    if path == None:
+        raise Exception("couldn't get this scripts name!")
+
+    return path[: path.rindex("/")]
 
 
 def pkgconfig_is_installed(pkg: str):
