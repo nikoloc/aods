@@ -40,7 +40,7 @@ def get_c_compiler():
 def create_build_dir(path: str):
     try:
         os.mkdir(path)
-        os.mkdir(f"{path}/deps")
+        os.mkdir(f"{path}/_deps")
     except:
         raise Exception(
             f"couldn't make a build directory `{path}`!\nmaybe the project is already setup?\nrun `make clean` if you wish to reinitialize it!"
@@ -257,7 +257,7 @@ def create_dep_name(ctx: Context, source: str):
     if ctx._index != -1:
         base = f"{ctx._index}_{base}"
 
-    return f"{ctx._build_dir}/deps/{base}.d"
+    return f"{ctx._build_dir}/_deps/{base}.d"
 
 
 def escape_spaces(s: str):
@@ -290,7 +290,7 @@ def create_object_makefile_entry(ctx: Context, source: str):
     if ctx._project_type == ProjectType.SHARED_LIBRARY:
         flags.append("-fPIC")
 
-    header = create_header(dest, [source], [ctx._build_dir, f"{ctx._build_dir}/deps"])
+    header = create_header(dest, [source], [ctx._build_dir, f"{ctx._build_dir}/_deps"])
     cmd = create_shell(
         [
             ctx._compiler,
@@ -393,7 +393,7 @@ def pkgconfig_get_variable(pkg: str, var: str):
     return output
 
 
-def default_debug_flags():
+def debug_flags():
     return [
         "-g",
         "-O0",
@@ -406,7 +406,7 @@ def default_debug_flags():
     ]
 
 
-def default_release_flags():
+def release_flags():
     return [
         "-O2",
         "-march=native",
