@@ -3,6 +3,7 @@ import json
 import subprocess
 import os
 import shlex
+
 from enum import Enum
 
 
@@ -37,14 +38,21 @@ def get_c_compiler():
     raise Exception("no c compiler found")
 
 
-def create_build_dir(path: str):
+def get_build_dir():
+    build = os.environ.get("AODS_DIR")
+    if build == None:
+        return "build"
+
+    return build
+
+
+def create_build_dir():
     try:
-        os.mkdir(path)
-        os.mkdir(f"{path}/_deps")
+        os.mkdir(get_build_dir())
     except:
-        raise Exception(
-            f"couldn't make a build directory `{path}`!\nmaybe the project is already setup?\nrun `make clean` if you wish to reinitialize it!"
-        )
+        raise Exception(f"""couldn't make a build directory '{get_build_dir()}'!
+            maybe the project is already setup?
+            run `make clean` if you wish to reinitialize it!""")
 
 
 class Context:
@@ -52,7 +60,6 @@ class Context:
         self,
         name: str,
         *,
-        build_dir: str = "build",
         project_type: ProjectType = ProjectType.EXECUTABLE,
         compiler: str = get_c_compiler(),
         archiver: str = "ar",
@@ -61,7 +68,6 @@ class Context:
         self._flags: list[str] = []
 
         self._name = name
-        self._build_dir = build_dir
         self._project_type = project_type
         self._compiler = compiler
         self._archiver = archiver
@@ -75,8 +81,15 @@ class Context:
             if not ok:
                 raise Exception("building a static library but no archiver found!")
 
-        # used when building multiple projects with `Context.build_multiple()`, value of -1 means we are not
-        self._index = -1
+    def get_dest_dir(self):
+        return f"{get_build_dir()}/_{self._name}"
+
+    def create_dest_dir(self):
+        build_dir = self.get_dest_dir()
+
+        # this should not fail
+        os.mkdir(f"{build_dir}")
+        os.mkdir(f"{build_dir}/_deps")
 
     def add_source(self, source: str | list[str]):
         if isinstance(source, str):
@@ -117,7 +130,8 @@ class Context:
         self._flags.extend(flag)
 
     def build(self):
-        create_build_dir(self._build_dir)
+        create_build_dir()
+        self.create_dest_dir()
 
         objects = [
             create_object_makefile_entry(self, source) for source in self._sources
@@ -132,12 +146,12 @@ class Context:
             )
             mk.write(target["entry"])
 
-            mk.write(create_clean_makefile_entry([self._build_dir]))
+            mk.write(create_clean_makefile_entry())
 
             for object in objects:
                 mk.write(object["entry"])
 
-        with open(f"{self._build_dir}/compile_commands.json", "w") as j:
+        with open(f"{get_build_dir()}/compile_commands.json", "w") as j:
             root = get_root_dir()
 
             data = [
@@ -160,14 +174,9 @@ class Context:
         targets: list[dict] = []
         objects: list[dict] = []
 
-        build_dirs: list[str] = []
-
-        for index, ctx in enumerate(ctxs):
-            if not ctx._build_dir in build_dirs:
-                create_build_dir(ctx._build_dir)
-                build_dirs.append(ctx._build_dir)
-
-            ctx._index = index
+        create_build_dir()
+        for ctx in ctxs:
+            ctx.create_dest_dir()
 
             target_objects = [
                 create_object_makefile_entry(ctx, source) for source in ctx._sources
@@ -189,7 +198,7 @@ class Context:
                 create_header("all", [target["dest"] for target in targets]) + "\n"
             )
 
-            mk.write(create_clean_makefile_entry(build_dirs))
+            mk.write(create_clean_makefile_entry())
 
             for target in targets:
                 mk.write(target["entry"])
@@ -198,7 +207,7 @@ class Context:
                 mk.write(object["entry"])
 
         # we just dump it in the first build directory, it is not really important to separate them
-        with open(f"{ctxs[0]._build_dir}/compile_commands.json", "w") as j:
+        with open(f"{get_build_dir()}/compile_commands.json", "w") as j:
             root = get_root_dir()
 
             data = [
@@ -246,26 +255,22 @@ def pkgconfig_libs(dep: str | list[str]):
 
 def create_object_name(ctx: Context, source: str):
     base = file_name_no_extension(source)
-    if ctx._index != -1:
-        base = f"{ctx._index}_{base}"
 
-    return f"{ctx._build_dir}/{base}.o"
+    return f"{ctx.get_dest_dir()}/{base}.o"
 
 
 def create_dep_name(ctx: Context, source: str):
     base = file_name_no_extension(source)
-    if ctx._index != -1:
-        base = f"{ctx._index}_{base}"
 
-    return f"{ctx._build_dir}/_deps/{base}.d"
+    return f"{ctx.get_dest_dir()}/_deps/{base}.d"
 
 
 def escape_spaces(s: str):
     return s.replace(" ", r"\ ")
 
 
-def create_header(target: str, deps: list[str] = [], dir_deps: list[str] = []):
-    return f"{escape_spaces(target)}: {' '.join(escape_spaces(dep) for dep in deps)} | {' '.join(escape_spaces(dep) for dep in dir_deps)}"
+def create_header(target: str, deps: list[str] = []):
+    return f"{escape_spaces(target)}: {' '.join(escape_spaces(dep) for dep in deps)}"
 
 
 def create_shell(args: list[str]):
@@ -276,9 +281,9 @@ def create_phony_list():
     return f".PHONY: clean\n"
 
 
-def create_clean_makefile_entry(build_dirs: list[str]):
-    header = create_header("clean", ["Makefile"], build_dirs)
-    cmd = create_shell(["rm", "-rf", *build_dirs, "Makefile"])
+def create_clean_makefile_entry():
+    header = create_header("clean", ["Makefile"])
+    cmd = create_shell(["rm", "-rf", get_build_dir(), "Makefile"])
     return f"{header}\n\t{cmd}\n"
 
 
@@ -290,7 +295,7 @@ def create_object_makefile_entry(ctx: Context, source: str):
     if ctx._project_type == ProjectType.SHARED_LIBRARY:
         flags.append("-fPIC")
 
-    header = create_header(dest, [source], [ctx._build_dir, f"{ctx._build_dir}/_deps"])
+    header = create_header(dest, [source])
     cmd = create_shell(
         [
             ctx._compiler,
@@ -320,8 +325,8 @@ def create_object_makefile_entry(ctx: Context, source: str):
 def create_target_makefile_entry(ctx: Context, objects: list[str]):
     match ctx._project_type:
         case ProjectType.EXECUTABLE:
-            dest = f"{ctx._build_dir}/{ctx._name}"
-            header = create_header(dest, objects, [ctx._build_dir])
+            dest = f"{ctx.get_dest_dir()}/{ctx._name}"
+            header = create_header(dest, objects)
 
             cmd = create_shell(
                 [
@@ -333,8 +338,8 @@ def create_target_makefile_entry(ctx: Context, objects: list[str]):
                 ]
             )
         case ProjectType.SHARED_LIBRARY:
-            dest = f"{ctx._build_dir}/lib{ctx._name}.so"
-            header = create_header(dest, objects, [ctx._build_dir])
+            dest = f"{ctx.get_dest_dir()}/lib{ctx._name}.so"
+            header = create_header(dest, objects)
 
             cmd = create_shell(
                 [
@@ -347,8 +352,8 @@ def create_target_makefile_entry(ctx: Context, objects: list[str]):
                 ]
             )
         case ProjectType.STATIC_LIBRARY:
-            dest = f"{ctx._build_dir}/lib{ctx._name}.a"
-            header = create_header(dest, objects, [ctx._build_dir])
+            dest = f"{ctx.get_dest_dir()}/lib{ctx._name}.a"
+            header = create_header(dest, objects)
 
             cmd = create_shell(
                 [
