@@ -82,7 +82,7 @@ class Context:
                 raise Exception("building a static library but no archiver found!")
 
     def get_dest_dir(self):
-        return f"{get_build_dir()}/_{self._name}"
+        return f"{get_build_dir()}/{self._name}"
 
     def create_dest_dir(self):
         build_dir = self.get_dest_dir()
